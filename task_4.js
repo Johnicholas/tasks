@@ -19,7 +19,8 @@
 //  "Please deliver this to so-and-so."
 // SchedulerCommand has a release(resource) method that returns nothing.
 //  "I'm done with this, you can give it to someone else."
-// Note: there is no 'spawn' method, though it might be reasonable.
+// SchedulerCommand has  spawn(address, task) method that returns nothing.
+//  "Start this task at this address."
 //
 // These classes Run, Wait, Sleep, Acquire are scheduler commands.
 function Run() {
@@ -72,6 +73,15 @@ Release.prototype.accept = function (visitor) {
     visitor.release(this.resource)
     this.rest.accept(visitor)
 }
+function Spawn(address, task, rest) {
+    this.address = address
+    this.task = task
+    this.rest = rest
+}
+Spawn.prototype.accept = function (visitor) {
+    visitor.spawn(this.address, this.task)
+    this.rest.accept(visitor)
+}
 // CommandPrinter is a scheduler command visitor
 // that prints what it sees
 function CommandPrinter() {
@@ -97,6 +107,9 @@ CommandPrinter.prototype.send = function (address, message) {
 CommandPrinter.prototype.release = function (resource) {
     print('release '+resource)
 }
+CommandPrinter.prototype.spawn = function (task) {
+    print('spawn '+task)
+}
 
 // RecordSchedulerCommand is an implementation of SchedulerCommand
 function RecordSchedulerCommand(initial) {
@@ -110,6 +123,9 @@ RecordSchedulerCommand.prototype.send = function (address, message) {
 }
 RecordSchedulerCommand.prototype.release = function (resource) {
     this.command = new Release(resource, this.command)
+}
+RecordSchedulerCommand.prototype.spawn = function (address, task) {
+    this.command = new Spawn(address, task, this.command)
 }
 RecordSchedulerCommand.prototype.accept = function (visitor) {
     this.command.accept(visitor)
@@ -208,7 +224,6 @@ BarbershopCustomer.prototype.step = function (s, message_ignored) {
     var answer
     switch (this.state) {
     case 0:
-	print(this + ' arrives.')
 	answer = s.acquire('barber')
 	this.state += 1
 	break
@@ -222,15 +237,18 @@ BarbershopCustomer.prototype.step = function (s, message_ignored) {
 	// more properly this should be 'die',
 	// but it's equivalent since we won't get any messages
 	answer = s.wait()
+	answer.release('barber')
 	this.state += 1
 	break
     case 3:
-	throw 'this should never happen!'
+	throw 'unexpected step in '+this.toString()
 	break
     }
     return answer
 }
 // BarbershopClosing is another simple task
+// It's responsible for waiting until closing time,
+// and then stopping the simulation.
 function BarbershopClosing() {
     this.state = 0
 }
@@ -246,11 +264,39 @@ BarbershopClosing.prototype.step = function (s, message_ignored) {
 	answer.stop()
 	this.state += 1
 	break
-    case 2:
+    default:
 	throw 'this should never happen!'
 	break
     }
     return answer
+}
+// BarbershopGenerator is a simple task
+// It's responsible for generating customers intermittently.
+function BarbershopGenerator() {
+    this.state = 0
+}
+BarbershopGenerator.interarrival_time = new Flat(1, 25)
+BarbershopGenerator.prototype.step = function (s, message_ignored) {
+    var answer
+    var customer
+    switch (this.state) {
+    case 0:
+	answer = s.sleep(BarbershopGenerator.interarrival_time.generate())
+	this.state = 1
+	break
+    case 1:
+	answer = s.sleep(BarbershopGenerator.interarrival_time.generate())
+	customer = new BarbershopCustomer()
+	print(customer+' arrives.')
+	answer.spawn(customer.toString(), customer)
+	this.state = 1 // note: stay in the same state
+	break
+    default:
+	throw 'this should never happen!'
+	break
+    }
+    return answer
+
 }
 
 // Scheduler is a 'real' scheduler
@@ -273,7 +319,7 @@ Scheduler.prototype.step = function () {
 	// ask the task what it wants to do
 	var command = this.current_event.task.step(new RecordScheduler())
 	// print it
-	command.accept(new CommandPrinter())
+	// command.accept(new CommandPrinter())
 	// do it
 	command.accept(this)
     } else {
@@ -283,10 +329,6 @@ Scheduler.prototype.step = function () {
 // mutators for scheduler
 Scheduler.prototype.addResource = function (name) {
     this.resources[name] = { current: null, waiting_line: [] }
-}
-Scheduler.prototype.addTask = function (task_name, task) {
-    this.tasks[task_name] = task
-    this.agenda.push({time: this.clock, task: task})
 }
 // services for Scheduler
 Scheduler.prototype.run = function () {
@@ -300,11 +342,11 @@ Scheduler.prototype.sleep = function (interval) {
 }
 Scheduler.prototype.acquire = function (resource) {
     if (this.resources[resource].current === null) {
-	// it's available now
+	print(resource+' is available now');
 	this.resources[resource].current = this.current_event.task
 	this.agenda.push({time: this.clock, task: this.current_event.task})
     } else {
-	// not currently available
+	print(resource+' is not currently available');
 	this.resources[resource].waiting_line.push(this.current_event.task)
     }
 }
@@ -315,34 +357,39 @@ Scheduler.prototype.send = function (address, message) {
     // TODO
 }
 Scheduler.prototype.release = function (resource) {
-    if (this.resources[resource].current !== resource) {
-	throw "you can't release something you don't have!"
+    var new_task
+    if (this.current_event.task !== this.resources[resource].current) {
+	throw 'you cannot release something you do not have!'
+    }
+    if (this.resources[resource].waiting_line.length > 0) {
+	new_task = this.resources[resource].waiting_line.shift()
+	this.resources[resource].current = new_task
+	this.agenda.push({time: this.clock, task: new_task})
     } else {
-	if (this.resources[resource].waiting_line.length > 0) {
-	    var new_task = this.resources[resource].waiting_line.shift()
-	    this.resources[resource].current = new_task
-	    this.agenda.push({time: this.clock, task: this.current_event.task})
-	} else {
-	    this.resources[resource].current = null
-	}
+	print(resource+' released, idling.')
+	this.resources[resource].current = null
     }
 }
-
+Scheduler.prototype.spawn = function (task_name, task) {
+    if (this.tasks[task_name]) {
+	throw 'cannot spawn a task on top of another task!'
+    } else {
+	this.tasks[task_name] = task
+	this.agenda.push({time: this.clock, task: task})
+    }
+}
 	
 
 // a simple print-based scheduler loop
 // var chores = new Chores()
-var customer = new BarbershopCustomer()
+var generator = new BarbershopGenerator()
 var closing = new BarbershopClosing()
 var barbershop = new Scheduler()
 barbershop.addResource('barber')
-barbershop.addTask(customer)
-barbershop.addTask(closing)
+barbershop.spawn('generator', generator);
+barbershop.spawn('closing', closing)
 
-var i = 0
 while (barbershop.running) {
-    print('step '+i)
-    i += 1
     barbershop.step()
 }
 
