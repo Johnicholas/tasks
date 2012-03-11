@@ -1,59 +1,134 @@
-// utilities
-// generate a random integer between the lower and upper bound,
-// including lower and excluding upper
-function random(lower, upper) {
-    return Math.floor(Math.random() * (upper - lower)) + lower;
-}
+// -*- Javascript -*-
+'use strict';
 
-// configuration
-var interarrival_time_lower = 1;
-var interarrival_time_upper = 25;
-var service_time_lower = 5;
-var service_time_upper = 15;
-var stop_time = 8 * 60;
+// This barbershop simulation depends on task (version 6 is good),
+// and a print function
+function Barbershop(print, task) {
+    // A distribution is something that has a generate method,
+    // that generates numbers randomly according to some distribution
+    //
+    // A flat distribution over the integers between a lower and upper bound.
+    // including the lower bound and excluding the upper.
+    // 
+    // It's used in the barbershop simulation.
+    function Flat(lower, upper) {
+	this.lower = lower
+	this.upper = upper
+    }
+    Flat.prototype.generate = function () {
+	return Math.floor(
+            Math.random() * (this.upper - this.lower)
+	) + this.lower
+    }
+    Flat.prototype.toString = function () {
+	return '[' + this.lower + ', ' + this.upper + ')';
+    }
 
-// initialization
-var clock = 0;
-var idle = true;
-var length_of_waiting_line = 0;
-var max_length_of_waiting_line = 0;
-var time_of_service_completion = stop_time + 1; // TODO
 
-var time_of_arrival = random(interarrival_time_lower, interarrival_time_upper);
-
-while (true) {
-    // advance time to the next event occurrence
-    clock = Math.min(time_of_arrival, time_of_service_completion, stop_time);
-    // dispatch based on which kind of event occurred
-    if (clock === time_of_service_completion) {
-	if (length_of_waiting_line > 0) {
-	    length_of_waiting_line -= 1;
-	    time_of_service_completion = clock + random(service_time_lower, service_time_upper);
-	} else {
-	    idle = true;
-	    time_of_service_completion = stop_time + 1; // TODO
+    // BarbershopCustomer is simple task;
+    // customers get their hair cut, which
+    // takes a barber and a random amount of service time,
+    // and then they 'leave' - there is no die command,
+    // so they just don't do anything more.
+    function BarbershopCustomer() {
+	this.number = BarbershopCustomer.count
+	this.state = 0
+	BarbershopCustomer.count += 1
+    }
+    BarbershopCustomer.count = 0
+    BarbershopCustomer.service_time = new Flat(5, 15)
+    BarbershopCustomer.prototype.toString = function () {
+	return 'Customer' + this.number
+    }
+    BarbershopCustomer.prototype.step = function (s, message_ignored) {
+	var answer
+	switch (this.state) {
+	case 0:
+            answer = s.acquire('barber')
+            this.state += 1
+            break
+	case 1:
+            print(this + ' sits down to get their hair cut.')
+            answer = s.sleep(BarbershopCustomer.service_time.generate())
+            this.state += 1
+            break
+	case 2:
+            print(this + ' finishes their haircut, pays and leaves')
+            // more properly this should be 'die',
+            // but it's equivalent since we won't get any messages
+            answer = s.wait()
+            answer.release('barber')
+            this.state += 1
+            break
+	case 3:
+            throw 'unexpected step in '+this.toString()
+            break
 	}
-    } else if (clock === stop_time) {
-	print('interarrival times were in [' +
-	      interarrival_time_lower + ', ' +
-	      interarrival_time_upper + ')');
-	print('service times were in [' +
-	      service_time_lower + ', ' +
-	      service_time_upper + ')');
-	print('stop time was ' + stop_time);
-	print('max length of waiting line was ' + max_length_of_waiting_line);
-	break;
-    } else {
-	if (clock !== time_of_arrival) {
-	    throw 'clock should equal time of arrival';
+	return answer
+    }
+
+    // BarbershopClosing is another simple task
+    // It's responsible for waiting until closing time,
+    // and then stopping the simulation.
+    function BarbershopClosing() {
+	this.state = 0
+    }
+    BarbershopClosing.prototype.step = function (s, message_ignored) {
+	var answer
+	switch (this.state) {
+	case 0:
+            answer = s.sleep(8 * 60)
+            this.state += 1
+            break
+	case 1:
+            answer = s.wait()
+            answer.stop()
+            this.state += 1
+            break
+	default:
+            throw 'this should never happen!'
+            break
 	}
-	time_of_arrival = clock + random(interarrival_time_lower, interarrival_time_upper);
-	if (idle === 1) {
-	    idle = 0; // TODO
-	    time_of_service_completion = clock + random(service_time_lower, service_time_upper);
-	} else {
-	    length_of_waiting_line += 1;
-	    max_length_of_waiting_line = Math.max(length_of_waiting_line, max_length_of_waiting_line);
+	return answer
+    }
+
+    // BarbershopGenerator is a simple task
+    // It's responsible for generating customers intermittently.
+    function BarbershopGenerator() {
+	this.state = 0
+    }
+    BarbershopGenerator.interarrival_time = new Flat(1, 25)
+    BarbershopGenerator.prototype.step = function (s, message_ignored) {
+	var answer
+	var customer
+	switch (this.state) {
+	case 0:
+            answer = s.sleep(BarbershopGenerator.interarrival_time.generate())
+            this.state = 1
+            break
+	case 1:
+            answer = s.sleep(BarbershopGenerator.interarrival_time.generate())
+            customer = new BarbershopCustomer()
+            print(customer+' arrives.')
+            answer.spawn(customer.toString(), customer)
+            this.state = 1 // note: stay in the same state
+            break
+	default:
+            throw 'this should never happen!'
+            break
 	}
+	return answer
+    }
+
+    // Configure the simulation
+    var generator = new BarbershopGenerator()
+    var closing = new BarbershopClosing()
+    var barbershop = new task.Scheduler()
+    barbershop.addResource('barber')
+    barbershop.spawn('generator', generator)
+    barbershop.spawn('closing', closing)
+    // Run the simulation
+    while (barbershop.running) {
+	barbershop.step()
     }
 }
